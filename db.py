@@ -7,7 +7,7 @@ def dict_factory(cursor, row):
         d[col[0]] = row[idx]
     return d
 
-db = sqlite3.connect(":memory:")
+db = sqlite3.connect(":memory:", check_same_thread=False)
 db.row_factory = dict_factory
 cursor = db.cursor()
 
@@ -32,6 +32,17 @@ CREATE TABLE logs (
     active BOOLEAN,
     entry_time TEXT,
     dwell TEXT,
+    FOREIGN KEY (region_id) REFERENCES regions(region_id)
+)
+""")
+
+cursor.execute("""
+CREATE TABLE density_event (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    region_id INTEGER,
+    active BOOLEAN,
+    start_time TEXT,
+    end_time TEXT,
     FOREIGN KEY (region_id) REFERENCES regions(region_id)
 )
 """)
@@ -68,6 +79,14 @@ def get_logs(region_name):
     WHERE region_id = (SELECT region_id FROM regions WHERE name = ?)
     """, (region_name,))
     return cursor.fetchall()
+    
+def get_active_density_event(region_name):
+    cursor.execute("""
+    SELECT * FROM density_event
+    WHERE region_id = (SELECT region_id FROM regions WHERE name = ?)
+    AND active = 1
+    """, (region_name,))
+    return cursor.fetchone()
 
 def get_active_log(region_name, obj_id):
     cursor.execute("""
@@ -116,5 +135,49 @@ def update_log_event(region_name, obj_id):
         """, (region_id, obj_id, entry_time))
 
         print(f"Inserted new log for object {obj_id} in region '{region_name}' at {entry_time}.")
+
+    db.commit()
+
+def update_density_event(region_name):
+    cursor.execute("""
+    SELECT name, region_id FROM regions WHERE name = ?
+    """, (region_name,))
+    region = cursor.fetchone()
+
+    if not region:
+        print(f"Region '{region_name}' not found.")
+        return
+
+    region_id = region['region_id']
+
+    cursor.execute("""
+    SELECT * FROM density_event 
+    WHERE region_id = ? AND active = 1
+    """, (region_id,))
+    event = cursor.fetchone()
+
+    if event: 
+        end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+        UPDATE density_event
+        SET active = 0, end_time = ?
+        WHERE event_id = ?
+        """, (end_time, event['event_id']))
+
+        print(f"Updated density event for region '{region_name}'.")
+        return {
+            "zone": region["name"],
+            "start_time": event["start_time"],
+            "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    else:
+        start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+        INSERT INTO density_event (region_id, active, start_time, end_time)
+        VALUES (?, 1, ?, NULL)
+        """, (region_id, start_time))
+
+        print(f"Inserted new density event for region '{region_name}'")
 
     db.commit()
