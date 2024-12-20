@@ -1,0 +1,120 @@
+import sqlite3
+from datetime import datetime
+
+def dict_factory(cursor, row):
+    d = {}
+    for idx,col in enumerate(cursor.description):
+        d[col[0]] = row[idx]
+    return d
+
+db = sqlite3.connect(":memory:")
+db.row_factory = dict_factory
+cursor = db.cursor()
+
+# Regions Table
+cursor.execute("""
+CREATE TABLE regions (
+    region_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT,
+    x_min INTEGER,
+    y_min INTEGER,
+    x_max INTEGER,
+    y_max INTEGER
+)
+""")
+
+# Logs Table
+cursor.execute("""
+CREATE TABLE logs (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    region_id INTEGER,
+    object_id INTEGER,
+    active BOOLEAN,
+    entry_time TEXT,
+    dwell TEXT,
+    FOREIGN KEY (region_id) REFERENCES regions(region_id)
+)
+""")
+
+db.commit()
+
+def create_region(region_name, x_min, y_min, x_max, y_max):
+    cursor.execute("""
+    INSERT INTO regions (name, x_min, y_min, x_max, y_max)
+    VALUES (?, ?, ?, ?, ?)
+    """, (region_name, x_min, y_min, x_max, y_max))
+    db.commit()
+    print(f"Region created: {region_name}, Coordinates: ({x_min}, {y_min}, {x_max}, {y_max})")
+
+def get_regions():
+    cursor.execute("""SELECT * FROM regions""")
+    regions = cursor.fetchall()
+    return regions
+
+def get_region_count(region_name):
+    cursor.execute("""
+    SELECT COUNT(*) as count
+    FROM logs
+    WHERE region_id = (SELECT region_id FROM regions WHERE name = ?)
+    AND active = 1
+    """, (region_name,))
+    
+    count = cursor.fetchone()["count"]
+    return count
+
+def get_logs(region_name):
+    cursor.execute("""
+    SELECT * FROM logs
+    WHERE region_id = (SELECT region_id FROM regions WHERE name = ?)
+    """, (region_name,))
+    return cursor.fetchall()
+
+def get_active_log(region_name, obj_id):
+    cursor.execute("""
+    SELECT * FROM logs
+    WHERE region_id = (SELECT region_id FROM regions WHERE name = ?)
+    AND object_id = ? AND active = 1
+    """, (region_name, obj_id))
+    return cursor.fetchone()
+
+def update_log_event(region_name, obj_id):
+    cursor.execute("""
+    SELECT region_id FROM regions WHERE name = ?
+    """, (region_name,))
+    region = cursor.fetchone()
+
+    if not region:
+        print(f"Region '{region_name}' not found.")
+        return
+
+    region_id = region['region_id']
+
+    cursor.execute("""
+    SELECT log_id, entry_time FROM logs
+    WHERE region_id = ? AND object_id = ? AND active = 1
+    """, (region_id, obj_id))
+    log = cursor.fetchone()
+
+    if log:
+        log_id = log['log_id']
+        entry_time = datetime.strptime(log['entry_time'], "%Y-%m-%d %H:%M:%S")
+        exit_time = datetime.now()
+        dwell_time = str(exit_time - entry_time)
+
+        cursor.execute("""
+        UPDATE logs
+        SET active = 0, dwell = ?
+        WHERE log_id = ?
+        """, (dwell_time, log_id))
+
+        print(f"Updated log for object {obj_id} in region '{region_name}'. Dwell time: {dwell_time}")
+    else:
+        entry_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("""
+        INSERT INTO logs (region_id, object_id, active, entry_time, dwell)
+        VALUES (?, ?, 1, ?, NULL)
+        """, (region_id, obj_id, entry_time))
+
+        print(f"Inserted new log for object {obj_id} in region '{region_name}' at {entry_time}.")
+
+    db.commit()
