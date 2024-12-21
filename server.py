@@ -4,6 +4,7 @@ from collections import deque
 import base64
 import traceback
 import copy
+import threading
 
 from dotenv import load_dotenv
 import boto3
@@ -48,6 +49,9 @@ STEP = 5
 
 frames = deque(maxlen=1000)
 
+process_thread = None
+stop_event = threading.Event()
+
 # --- Util
 def upload_to_s3(file_obj, filename):
     try:
@@ -71,6 +75,8 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # --- Routes
 @app.route("/process_stream", methods=["POST"])
 def process_stream():
+    global process_thread, stop_event
+
     data = request.json
     video_stream_url = data.get("video_stream_url", 0)  # Default to webcam if no URL is provided
     zones = data["zones"]
@@ -78,11 +84,45 @@ def process_stream():
     if not zones:
         return jsonify({"error": "Missing required zones parameter."}), 400
 
+    if process_thread and process_thread.is_alive():
+        return jsonify({"error": "Processing is already running"}), 400
+
     try:
-        process_and_stream(video_stream_url, zones)
-        return jsonify({"message": "Processing Stopped."}), 200
+        # Clear the stop event before starting the thread
+        stop_event.clear()
+
+        # Create and start a new thread
+        process_thread = threading.Thread(target=process_and_stream, args=(video_stream_url, zones))
+        process_thread.daemon = True
+        process_thread.start()
+
+        return jsonify({"message": "Processing started"}), 200
     except Exception as e:
-        raise AppError(str(e), status_code=500)
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/stop_process", methods=["POST"])
+def stop_process():
+    global stop_event
+
+    if not process_thread or not process_thread.is_alive():
+        return jsonify({"error": "No processing is currently running"}), 400
+
+    # Signal the thread to stop
+    stop_event.set()
+    process_thread.join()  # Wait for the thread to finish
+
+    response = {
+        "footfall_summary": {
+            "total_footfall": 0,
+            "zone_footfall": {},
+        },
+        "high_density_times": [],
+        "heatmap_urls": []
+    }
+
+    frames.clear()
+
+    return jsonify({"message": "Processing stopped"}), 200
 
 def process_and_stream(video_stream_url, zones):
     model = YOLO("yolo11n.pt")
@@ -119,7 +159,7 @@ def process_and_stream(video_stream_url, zones):
 
     frame_counter = 0
 
-    while videocapture.isOpened():
+    while videocapture.isOpened() and not stop_event.is_set():
         success, frame = videocapture.read()
         if not success:
             break
@@ -200,6 +240,10 @@ def process_and_stream(video_stream_url, zones):
         socketio.emit("response", response)
         # socketio.emit("frame", frame_bytes)
 
+        if stop_event.is_set():
+            print("Stopping processing")
+            break
+    
     videocapture.release()
 
 @app.route("/generate_heatmap", methods=["GET"])
@@ -251,7 +295,6 @@ def generate_heatmap():
         raise AppError(str(e), status_code=500)
 
 # --- Error Handling
-
 class AppError(Exception):
     def __init__(self, message, status_code=400):
         print(message)
@@ -272,7 +315,7 @@ def handle_unexpected_error(error):
     print(f"Unexpected Error: {traceback_str}")
     return jsonify({"error": "An unexpected error occurred", "traceback": traceback_str}), 500
 
-
+# --- Socket Logic
 @socketio.on("connect")
 def connect():
     print("Client connected")
