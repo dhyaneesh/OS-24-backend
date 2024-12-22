@@ -11,6 +11,7 @@ import boto3
 
 from flask import Flask, request, jsonify
 from flask_socketio import SocketIO, emit
+from flask_cors import CORS
 
 import cv2
 import numpy as np
@@ -45,7 +46,7 @@ response = {
 }
 
 DENSITY_THRESHOLD = 10 
-STEP = 5
+STEP = 1
 
 frames = deque(maxlen=1000)
 
@@ -68,6 +69,7 @@ def upload_to_s3(file_obj, filename):
 
 # --- Flask
 app = Flask(__name__)
+CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -78,20 +80,18 @@ def process_stream():
     global process_thread, stop_event
 
     data = request.json
-    video_stream_url = data.get("video_stream_url", 0)  # Default to webcam if no URL is provided
+    video_stream_url = data.get("video_stream_url", 0)  
     zones = data["zones"]
 
-    if not zones:
-        return jsonify({"error": "Missing required zones parameter."}), 400
+    if video_stream_url == "CAMERA":
+        video_stream_url = 0
 
     if process_thread and process_thread.is_alive():
         return jsonify({"error": "Processing is already running"}), 400
 
     try:
-        # Clear the stop event before starting the thread
         stop_event.clear()
 
-        # Create and start a new thread
         process_thread = threading.Thread(target=process_and_stream, args=(video_stream_url, zones))
         process_thread.daemon = True
         process_thread.start()
@@ -107,9 +107,8 @@ def stop_process():
     if not process_thread or not process_thread.is_alive():
         return jsonify({"error": "No processing is currently running"}), 400
 
-    # Signal the thread to stop
     stop_event.set()
-    process_thread.join()  # Wait for the thread to finish
+    process_thread.join()
 
     response = {
         "footfall_summary": {
@@ -146,12 +145,8 @@ def process_and_stream(video_stream_url, zones):
             zone["coordinates"]["x_max"], 
             zone["coordinates"]["y_max"]
         )
-    
-    regions = get_regions()
 
-    REGION_COLORS = [
-        tuple(np.random.randint(0, 255, 3).tolist()) for _ in regions
-    ] 
+    regions = []
 
     frame_width, frame_height = int(videocapture.get(3)), int(videocapture.get(4))
 
@@ -164,6 +159,8 @@ def process_and_stream(video_stream_url, zones):
         if not success:
             break
 
+        regions = get_regions()
+
         frame_counter += 1 
     
         if frame_counter % STEP == 0:  
@@ -172,7 +169,7 @@ def process_and_stream(video_stream_url, zones):
             os.makedirs(os.path.dirname(save_path), exist_ok=True) 
             cv2.imwrite(save_path, frame) 
 
-        results = model.track(frame, persist=True, classes=classes)
+        results = model.track(frame, persist=True, classes=classes, tracker="botsort.yaml")
         frame_time = datetime.now()
 
         if results[0].boxes.id is not None:
@@ -193,7 +190,7 @@ def process_and_stream(video_stream_url, zones):
                     object_paths[obj_id].append(bbox_center)
 
                     for i, region in enumerate(regions):
-                        region_color = REGION_COLORS[i % len(REGION_COLORS)]
+                        region_color = (0, 0, 255)
                         cv2.rectangle(
                             frame,
                             (region["x_min"], region["y_min"]),
@@ -245,6 +242,22 @@ def process_and_stream(video_stream_url, zones):
             break
     
     videocapture.release()
+
+@app.route("/create_zone", methods=["POST"])
+def create_zone():
+    if not process_thread or not process_thread.is_alive():
+        return jsonify({"error": "No processing is currently running"}), 400
+    
+    data = request.json
+    created_region = create_region(
+            data["zone_id"],
+            data["coordinates"]["x_min"], 
+            data["coordinates"]["y_min"], 
+            data["coordinates"]["x_max"], 
+            data["coordinates"]["y_max"]
+        )
+
+    return jsonify({"message": "Zone created"}), 200
 
 @app.route("/generate_heatmap", methods=["GET"])
 def generate_heatmap():
